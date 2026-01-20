@@ -1,0 +1,9 @@
+# OMRON HBP-9030 血压监测程序依赖
+# Python 3.7+ required
+
+# 串口通信
+pyserial>=3.5
+
+# 打包工具（仅打包时需要）
+# pyinstaller>=5.0
+
