@@ -10,6 +10,7 @@ OMRON HBP-9030 血压计数据监测程序
 - 模拟模式用于测试（无需真实设备）
 - 血压值颜色提示
 - 历史记录保存
+- 跨平台支持（Windows / Linux / 树莓派）
 """
 
 import tkinter as tk
@@ -20,6 +21,7 @@ import random
 import time
 import os
 import sys
+import platform
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Callable
@@ -32,6 +34,79 @@ try:
     SERIAL_AVAILABLE = True
 except ImportError:
     SERIAL_AVAILABLE = False
+
+
+# ============== 平台检测与适配 ==============
+class PlatformConfig:
+    """跨平台配置"""
+    
+    def __init__(self):
+        self.system = platform.system()  # 'Windows', 'Linux', 'Darwin'
+        self.machine = platform.machine()  # 'x86_64', 'armv7l', 'aarch64'
+        self.is_windows = self.system == 'Windows'
+        self.is_linux = self.system == 'Linux'
+        self.is_mac = self.system == 'Darwin'
+        self.is_raspberry_pi = self._detect_raspberry_pi()
+        
+        # 根据平台设置字体
+        if self.is_windows:
+            self.font_family = 'Microsoft YaHei UI'
+            self.font_mono = 'Consolas'
+        elif self.is_mac:
+            self.font_family = 'PingFang SC'
+            self.font_mono = 'Menlo'
+        else:  # Linux / 树莓派
+            self.font_family = 'Noto Sans CJK SC'  # 或 'WenQuanYi Micro Hei'
+            self.font_mono = 'DejaVu Sans Mono'
+        
+        # 根据平台设置窗口尺寸
+        if self.is_raspberry_pi:
+            # 树莓派通常使用小屏幕（如7寸800x480）
+            self.window_size = "800x480"
+            self.window_min = (750, 450)
+            self.font_scale = 0.85  # 字体缩小
+            self.fullscreen = True  # 默认全屏
+        else:
+            self.window_size = "700x750"
+            self.window_min = (600, 650)
+            self.font_scale = 1.0
+            self.fullscreen = False
+        
+        # 串口路径前缀
+        if self.is_windows:
+            self.serial_prefix = "COM"
+        else:
+            self.serial_prefix = "/dev/tty"
+    
+    def _detect_raspberry_pi(self) -> bool:
+        """检测是否为树莓派"""
+        if not self.is_linux:
+            return False
+        try:
+            with open('/proc/cpuinfo', 'r') as f:
+                cpuinfo = f.read()
+                return 'Raspberry Pi' in cpuinfo or 'BCM' in cpuinfo
+        except Exception:
+            pass
+        # 检查是否是ARM架构的Linux
+        return self.machine in ('armv7l', 'armv6l', 'aarch64')
+    
+    def get_font(self, size: int, weight: str = 'normal') -> tuple:
+        """获取适配平台的字体"""
+        scaled_size = int(size * self.font_scale)
+        return (self.font_family, scaled_size, weight)
+    
+    def get_mono_font(self, size: int) -> tuple:
+        """获取等宽字体"""
+        scaled_size = int(size * self.font_scale)
+        return (self.font_mono, scaled_size)
+    
+    def __str__(self):
+        return f"Platform: {self.system} ({self.machine}), RaspberryPi: {self.is_raspberry_pi}"
+
+
+# 全局平台配置
+PLATFORM = PlatformConfig()
 
 
 # ============== 日志配置 ==============
@@ -561,17 +636,16 @@ class BloodPressureMonitorGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("OMRON HBP-9030 血压监测")
-        self.root.geometry("700x750")
+        self.root.geometry(PLATFORM.window_size)
         self.root.configure(bg=self.COLORS['bg_dark'])
         self.root.resizable(True, True)
-        self.root.minsize(600, 650)
+        self.root.minsize(*PLATFORM.window_min)
         
-        # 设置窗口图标（如果有的话）
-        try:
-            # 尝试设置图标
-            pass
-        except Exception:
-            pass
+        # 树莓派默认全屏
+        if PLATFORM.fullscreen:
+            self.root.attributes('-fullscreen', True)
+            # 按Escape退出全屏
+            self.root.bind('<Escape>', lambda e: self.root.attributes('-fullscreen', False))
         
         # 数据
         self.readings: List[BloodPressureReading] = []
@@ -599,6 +673,9 @@ class BloodPressureMonitorGUI:
         # 更新串口列表
         self._refresh_ports()
         
+        # 显示平台信息
+        self._log(f"运行平台: {PLATFORM}")
+        
         # 检查pyserial是否可用
         if not SERIAL_AVAILABLE:
             self._log("警告: pyserial库未安装，仅可使用模拟模式")
@@ -622,18 +699,21 @@ class BloodPressureMonitorGUI:
     
     def _create_widgets(self):
         """创建界面组件"""
+        # 树莓派使用更紧凑的边距
+        pad = 10 if PLATFORM.is_raspberry_pi else 20
+        
         main_frame = tk.Frame(self.root, bg=self.COLORS['bg_dark'])
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=pad, pady=pad)
         
         # 标题
         title_label = tk.Label(
             main_frame,
             text="OMRON HBP-9030 血压监测",
-            font=('Microsoft YaHei UI', 24, 'bold'),
+            font=PLATFORM.get_font(24, 'bold'),
             fg=self.COLORS['text_primary'],
             bg=self.COLORS['bg_dark']
         )
-        title_label.pack(pady=(0, 20))
+        title_label.pack(pady=(0, pad))
         
         # 连接控制区
         self._create_connection_frame(main_frame)
@@ -659,7 +739,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             port_frame,
             text="串口:",
-            font=('Microsoft YaHei UI', 11),
+            font=PLATFORM.get_font(11),
             fg=self.COLORS['text_primary'],
             bg=self.COLORS['bg_medium']
         ).pack(side=tk.LEFT, padx=(0, 10))
@@ -670,14 +750,14 @@ class BloodPressureMonitorGUI:
             textvariable=self.port_var,
             state='readonly',
             width=15,
-            font=('Consolas', 10)
+            font=PLATFORM.get_mono_font(10)
         )
         self.port_combo.pack(side=tk.LEFT, padx=(0, 10))
         
         refresh_btn = tk.Button(
             port_frame,
             text="刷新",
-            font=('Microsoft YaHei UI', 10),
+            font=PLATFORM.get_font(10),
             bg=self.COLORS['bg_light'],
             fg=self.COLORS['text_primary'],
             activebackground=self.COLORS['accent'],
@@ -691,7 +771,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             port_frame,
             text="波特率:",
-            font=('Microsoft YaHei UI', 11),
+            font=PLATFORM.get_font(11),
             fg=self.COLORS['text_primary'],
             bg=self.COLORS['bg_medium']
         ).pack(side=tk.LEFT, padx=(20, 10))
@@ -703,7 +783,7 @@ class BloodPressureMonitorGUI:
             values=['9600', '19200', '38400', '57600', '115200'],
             state='readonly',
             width=10,
-            font=('Consolas', 10)
+            font=PLATFORM.get_mono_font(10)
         )
         baudrate_combo.pack(side=tk.LEFT, padx=(0, 20))
         
@@ -711,7 +791,7 @@ class BloodPressureMonitorGUI:
         self.connect_btn = tk.Button(
             port_frame,
             text="连接",
-            font=('Microsoft YaHei UI', 11, 'bold'),
+            font=PLATFORM.get_font(11, 'bold'),
             bg=self.COLORS['success'],
             fg=self.COLORS['text_primary'],
             activebackground=self.COLORS['accent'],
@@ -731,7 +811,7 @@ class BloodPressureMonitorGUI:
         self.sim_btn = tk.Button(
             mode_frame,
             text="启动模拟模式",
-            font=('Microsoft YaHei UI', 10),
+            font=PLATFORM.get_font(10),
             bg=self.COLORS['simulation'],
             fg=self.COLORS['text_primary'],
             activebackground=self.COLORS['accent'],
@@ -746,7 +826,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             mode_frame,
             text="间隔(秒):",
-            font=('Microsoft YaHei UI', 10),
+            font=PLATFORM.get_font(10),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         ).pack(side=tk.LEFT, padx=(0, 5))
@@ -756,7 +836,7 @@ class BloodPressureMonitorGUI:
             mode_frame,
             textvariable=self.sim_interval_var,
             width=5,
-            font=('Consolas', 10),
+            font=PLATFORM.get_mono_font(10),
             bg=self.COLORS['bg_light'],
             fg=self.COLORS['text_primary'],
             insertbackground=self.COLORS['text_primary'],
@@ -778,7 +858,7 @@ class BloodPressureMonitorGUI:
         self.status_label = tk.Label(
             mode_frame,
             text="未连接",
-            font=('Microsoft YaHei UI', 10),
+            font=PLATFORM.get_font(10),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         )
@@ -803,7 +883,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             sys_frame,
             text="收缩压",
-            font=('Microsoft YaHei UI', 14),
+            font=PLATFORM.get_font(14),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         ).pack()
@@ -811,7 +891,7 @@ class BloodPressureMonitorGUI:
         self.sys_value = tk.Label(
             sys_frame,
             text="---",
-            font=('Segoe UI', 56, 'bold'),
+            font=PLATFORM.get_font(56, 'bold'),
             fg=self.COLORS['accent'],
             bg=self.COLORS['bg_medium']
         )
@@ -820,7 +900,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             sys_frame,
             text="mmHg",
-            font=('Microsoft YaHei UI', 12),
+            font=PLATFORM.get_font(12),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         ).pack()
@@ -832,7 +912,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             dia_frame,
             text="舒张压",
-            font=('Microsoft YaHei UI', 14),
+            font=PLATFORM.get_font(14),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         ).pack()
@@ -840,7 +920,7 @@ class BloodPressureMonitorGUI:
         self.dia_value = tk.Label(
             dia_frame,
             text="---",
-            font=('Segoe UI', 56, 'bold'),
+            font=PLATFORM.get_font(56, 'bold'),
             fg=self.COLORS['accent_light'],
             bg=self.COLORS['bg_medium']
         )
@@ -849,7 +929,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             dia_frame,
             text="mmHg",
-            font=('Microsoft YaHei UI', 12),
+            font=PLATFORM.get_font(12),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         ).pack()
@@ -861,7 +941,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             pr_frame,
             text="心率",
-            font=('Microsoft YaHei UI', 14),
+            font=PLATFORM.get_font(14),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         ).pack()
@@ -869,7 +949,7 @@ class BloodPressureMonitorGUI:
         self.pr_value = tk.Label(
             pr_frame,
             text="---",
-            font=('Segoe UI', 56, 'bold'),
+            font=PLATFORM.get_font(56, 'bold'),
             fg=self.COLORS['success'],
             bg=self.COLORS['bg_medium']
         )
@@ -878,7 +958,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             pr_frame,
             text="bpm",
-            font=('Microsoft YaHei UI', 12),
+            font=PLATFORM.get_font(12),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         ).pack()
@@ -886,7 +966,7 @@ class BloodPressureMonitorGUI:
         self.update_time_label = tk.Label(
             frame,
             text="等待测量数据...",
-            font=('Microsoft YaHei UI', 10),
+            font=PLATFORM.get_font(10),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         )
@@ -903,7 +983,7 @@ class BloodPressureMonitorGUI:
         tk.Label(
             header_frame,
             text="历史记录",
-            font=('Microsoft YaHei UI', 12, 'bold'),
+            font=PLATFORM.get_font(12, 'bold'),
             fg=self.COLORS['text_primary'],
             bg=self.COLORS['bg_medium']
         ).pack(side=tk.LEFT)
@@ -911,7 +991,7 @@ class BloodPressureMonitorGUI:
         clear_btn = tk.Button(
             header_frame,
             text="清空",
-            font=('Microsoft YaHei UI', 9),
+            font=PLATFORM.get_font(9),
             bg=self.COLORS['bg_light'],
             fg=self.COLORS['text_secondary'],
             activebackground=self.COLORS['danger'],
@@ -930,7 +1010,7 @@ class BloodPressureMonitorGUI:
         
         self.history_listbox = tk.Listbox(
             list_frame,
-            font=('Consolas', 11),
+            font=PLATFORM.get_mono_font(11),
             bg=self.COLORS['bg_dark'],
             fg=self.COLORS['text_primary'],
             selectbackground=self.COLORS['accent'],
@@ -952,7 +1032,7 @@ class BloodPressureMonitorGUI:
         self.toggle_log_btn = tk.Button(
             toggle_frame,
             text="▶ 显示原始数据日志（调试用）",
-            font=('Microsoft YaHei UI', 9),
+            font=PLATFORM.get_font(9),
             bg=self.COLORS['bg_dark'],
             fg=self.COLORS['text_secondary'],
             activebackground=self.COLORS['bg_dark'],
@@ -970,7 +1050,7 @@ class BloodPressureMonitorGUI:
         
         self.log_text = tk.Text(
             self.log_frame,
-            font=('Consolas', 9),
+            font=PLATFORM.get_mono_font(9),
             bg=self.COLORS['bg_dark'],
             fg=self.COLORS['text_secondary'],
             height=6,
@@ -1241,7 +1321,7 @@ class LoginDialog:
         tk.Label(
             main_frame,
             text="🔒 授权验证",
-            font=('Microsoft YaHei UI', 20, 'bold'),
+            font=PLATFORM.get_font(20, 'bold'),
             fg=self.COLORS['text_primary'],
             bg=self.COLORS['bg_dark']
         ).pack(pady=(0, 10))
@@ -1250,7 +1330,7 @@ class LoginDialog:
         tk.Label(
             main_frame,
             text="OMRON HBP-9030 血压监测程序",
-            font=('Microsoft YaHei UI', 11),
+            font=PLATFORM.get_font(11),
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_dark']
         ).pack(pady=(0, 25))
@@ -1262,7 +1342,7 @@ class LoginDialog:
         tk.Label(
             input_frame,
             text="请输入授权密码：",
-            font=('Microsoft YaHei UI', 11),
+            font=PLATFORM.get_font(11),
             fg=self.COLORS['text_primary'],
             bg=self.COLORS['bg_medium']
         ).pack(anchor='w', pady=(0, 8))
@@ -1272,7 +1352,7 @@ class LoginDialog:
             input_frame,
             textvariable=self.password_var,
             show="●",
-            font=('Consolas', 14),
+            font=PLATFORM.get_mono_font(14),
             bg=self.COLORS['bg_light'],
             fg=self.COLORS['text_primary'],
             insertbackground=self.COLORS['text_primary'],
@@ -1285,7 +1365,7 @@ class LoginDialog:
         self.error_label = tk.Label(
             input_frame,
             text="",
-            font=('Microsoft YaHei UI', 9),
+            font=PLATFORM.get_font(9),
             fg=self.COLORS['danger'],
             bg=self.COLORS['bg_medium']
         )
@@ -1298,7 +1378,7 @@ class LoginDialog:
         self.login_btn = tk.Button(
             btn_frame,
             text="验证并进入",
-            font=('Microsoft YaHei UI', 11, 'bold'),
+            font=PLATFORM.get_font(11, 'bold'),
             bg=self.COLORS['success'],
             fg=self.COLORS['text_primary'],
             activebackground=self.COLORS['accent'],
@@ -1313,7 +1393,7 @@ class LoginDialog:
         tk.Button(
             btn_frame,
             text="退出",
-            font=('Microsoft YaHei UI', 11),
+            font=PLATFORM.get_font(11),
             bg=self.COLORS['bg_light'],
             fg=self.COLORS['text_secondary'],
             activebackground=self.COLORS['danger'],
