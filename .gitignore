@@ -29,3 +29,8 @@ env/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 注释
+*.txt
+.gitignore
+

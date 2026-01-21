@@ -155,238 +155,106 @@ class BloodPressureReading:
 class DataParser:
     """
     HBP-9030 数据解析器
-    支持多种可能的数据格式
+    固定格式: YYYY.MM.DD.HH.MM.ID(20).e(1).SYS(3).DIA(3).PR(3).MOTION+CR+LF
     """
     
     @staticmethod
     def parse(data: bytes) -> Optional[BloodPressureReading]:
         """
         尝试解析血压数据
-        支持多种格式的自动识别
+        仅支持 data_format.md 指定的固定格式
         """
         try:
-            # 尝试不同的编码方式解码
+            if not data:
+                return None
+
+            # 尝试不同的编码方式解码，保证不抛异常
             text = ""
             for encoding in ['ascii', 'utf-8', 'latin-1', 'gbk']:
                 try:
-                    text = data.decode(encoding).strip()
-                    break
+                    text = data.decode(encoding, errors='ignore').strip()
+                    if text:
+                        break
                 except (UnicodeDecodeError, LookupError):
                     continue
-            
-            if not text:
-                text = data.decode('ascii', errors='ignore').strip()
-            
+
             if not text:
                 return None
-                
+
             logger.debug(f"接收原始数据: {repr(text)}")
             logger.debug(f"十六进制: {data.hex()}")
-            
-            # 尝试多种格式解析（按优先级顺序）
-            result = (
-                DataParser._parse_format_hbp9030(text) or  # HBP-9030专用格式（优先）
-                DataParser._parse_format_csv(text) or
-                DataParser._parse_format_space(text) or
-                DataParser._parse_format_labeled(text) or
-                DataParser._parse_format_numeric(text) or
-                DataParser._parse_format_bytes(data)
-            )
-            
+
+            result = DataParser._parse_format_hbp9030(text)
             if result:
                 result.raw_data = text
                 logger.info(f"解析成功: SYS={result.systolic}, DIA={result.diastolic}, PR={result.pulse}")
-            
+            else:
+                logger.debug("解析失败: 未匹配固定格式")
+
             return result
-            
+
         except Exception as e:
-            logger.error(f"解析数据时出错: {e}")
+            logger.error(f"解析数据时出错: {e}", exc_info=True)
             return None
     
     @staticmethod
     def _parse_format_hbp9030(text: str) -> Optional[BloodPressureReading]:
         """
         HBP-9030 专用格式解析
-        
-        ============================================================
-        【重要】根据实际接收到的数据格式修改此方法！
-        ============================================================
-        
-        当你连接真实设备后，展开"原始数据日志"查看实际格式，
-        然后修改下面的解析逻辑。
-        
-        常见格式示例：
-        1. STX,ID,YYYY,MM,DD,HH,MM,SYS,DIA,PR,ETX
-           例: STX,001,2026,01,20,14,30,125,82,68,ETX
-           
-        2. 固定长度格式（每个字段固定宽度）
-           例: 001202601201430125082068
-           
-        3. 带校验和的格式
-           例: $BP,125,82,68*5A
-        
-        当前实现：尝试匹配 STX...ETX 格式，你可以根据实际情况修改
+        固定格式: YYYY.MM.DD.HH.MM.ID(20).e(1).SYS(3).DIA(3).PR(3).MOTION+CR+LF
         """
         try:
-            # === 格式1: STX,ID,YYYY,MM,DD,HH,MM,SYS,DIA,PR,ETX ===
-            if 'STX' in text and 'ETX' in text:
-                # 提取STX和ETX之间的内容
-                start = text.find('STX')
-                end = text.find('ETX')
-                if start >= 0 and end > start:
-                    content = text[start+3:end].strip(',')
-                    parts = content.split(',')
-                    # 假设最后3个数字是 SYS, DIA, PR
-                    if len(parts) >= 3:
-                        try:
-                            sys_val = int(parts[-3])
-                            dia_val = int(parts[-2])
-                            pr_val = int(parts[-1])
-                            if 60 <= sys_val <= 300 and 30 <= dia_val <= 200 and 30 <= pr_val <= 200:
-                                if sys_val > dia_val:
-                                    return BloodPressureReading(
-                                        systolic=sys_val,
-                                        diastolic=dia_val,
-                                        pulse=pr_val,
-                                        timestamp=datetime.now()
-                                    )
-                        except ValueError:
-                            pass
-            
-            # === 格式2: 在这里添加其他格式的解析 ===
-            # 例如固定长度格式:
-            # if len(text) == 24:  # 固定24字符
-            #     sys_val = int(text[15:18])
-            #     dia_val = int(text[18:21])
-            #     pr_val = int(text[21:24])
-            #     ...
-            
-            # === 格式3: 带校验和格式 ===
-            # if text.startswith('$BP,'):
-            #     ...
-            
+            clean = text.strip().replace("\x00", "")
+            parts = [p.strip() for p in clean.split('.') if p.strip() != ""]
+            if len(parts) < 11:
+                return None
+
+            if len(parts) > 11:
+                parts = parts[:11]
+
+            year_s, mon_s, day_s, hour_s, min_s, device_id, err_s, sys_s, dia_s, pr_s, motion_s = parts
+
+            if not (year_s.isdigit() and len(year_s) == 4):
+                return None
+            if not (mon_s.isdigit() and len(mon_s) == 2):
+                return None
+            if not (day_s.isdigit() and len(day_s) == 2):
+                return None
+            if not (hour_s.isdigit() and len(hour_s) == 2):
+                return None
+            if not (min_s.isdigit() and len(min_s) == 2):
+                return None
+            if not (device_id.isdigit() and len(device_id) == 20):
+                return None
+
+            try:
+                sys_val = int(sys_s)
+                dia_val = int(dia_s)
+                pr_val = int(pr_s)
+            except ValueError:
+                return None
+
+            if not (60 <= sys_val <= 300 and 30 <= dia_val <= 200 and 30 <= pr_val <= 200):
+                return None
+            if sys_val <= dia_val:
+                return None
+
+            try:
+                timestamp = datetime(
+                    int(year_s), int(mon_s), int(day_s),
+                    int(hour_s), int(min_s)
+                )
+            except ValueError:
+                timestamp = datetime.now()
+
+            return BloodPressureReading(
+                systolic=sys_val,
+                diastolic=dia_val,
+                pulse=pr_val,
+                timestamp=timestamp
+            )
         except Exception as e:
             logger.debug(f"HBP-9030格式解析失败: {e}")
-        return None
-    
-    @staticmethod
-    def _parse_format_csv(text: str) -> Optional[BloodPressureReading]:
-        """解析CSV格式: 日期,时间,SYS,DIA,PR 或类似格式"""
-        try:
-            parts = text.split(',')
-            if len(parts) >= 3:
-                numbers = []
-                for p in parts:
-                    p = p.strip()
-                    if p.isdigit():
-                        numbers.append(int(p))
-                
-                for i in range(len(numbers) - 2):
-                    sys_val, dia_val, pr_val = numbers[i], numbers[i+1], numbers[i+2]
-                    if 60 <= sys_val <= 300 and 30 <= dia_val <= 200 and 30 <= pr_val <= 200:
-                        if sys_val > dia_val:
-                            return BloodPressureReading(
-                                systolic=sys_val,
-                                diastolic=dia_val,
-                                pulse=pr_val,
-                                timestamp=datetime.now()
-                            )
-        except Exception:
-            pass
-        return None
-    
-    @staticmethod
-    def _parse_format_space(text: str) -> Optional[BloodPressureReading]:
-        """解析空格分隔格式"""
-        try:
-            parts = text.split()
-            numbers = [int(p) for p in parts if p.isdigit()]
-            
-            for i in range(len(numbers) - 2):
-                sys_val, dia_val, pr_val = numbers[i], numbers[i+1], numbers[i+2]
-                if 60 <= sys_val <= 300 and 30 <= dia_val <= 200 and 30 <= pr_val <= 200:
-                    if sys_val > dia_val:
-                        return BloodPressureReading(
-                            systolic=sys_val,
-                            diastolic=dia_val,
-                            pulse=pr_val,
-                            timestamp=datetime.now()
-                        )
-        except Exception:
-            pass
-        return None
-    
-    @staticmethod
-    def _parse_format_labeled(text: str) -> Optional[BloodPressureReading]:
-        """解析带标签格式: SYS:120 DIA:80 PR:72 等"""
-        try:
-            sys_match = re.search(r'(?:SYS|sys|收缩|高压)[:\s=]*(\d+)', text)
-            dia_match = re.search(r'(?:DIA|dia|舒张|低压)[:\s=]*(\d+)', text)
-            pr_match = re.search(r'(?:PR|pr|HR|hr|脉搏|心率|PULSE|pulse)[:\s=]*(\d+)', text)
-            
-            if sys_match and dia_match and pr_match:
-                return BloodPressureReading(
-                    systolic=int(sys_match.group(1)),
-                    diastolic=int(dia_match.group(1)),
-                    pulse=int(pr_match.group(1)),
-                    timestamp=datetime.now()
-                )
-            
-            bp_match = re.search(r'(\d{2,3})\s*/\s*(\d{2,3})\s+(\d{2,3})', text)
-            if bp_match:
-                return BloodPressureReading(
-                    systolic=int(bp_match.group(1)),
-                    diastolic=int(bp_match.group(2)),
-                    pulse=int(bp_match.group(3)),
-                    timestamp=datetime.now()
-                )
-        except Exception:
-            pass
-        return None
-    
-    @staticmethod
-    def _parse_format_numeric(text: str) -> Optional[BloodPressureReading]:
-        """解析纯数字格式DATA20260120120807265"""
-        try:
-            numbers = re.findall(r'\d+', text)
-            if len(numbers) >= 3:
-                for i in range(len(numbers) - 2):
-                    sys_val = int(numbers[i])
-                    dia_val = int(numbers[i+1])
-                    pr_val = int(numbers[i+2])
-                    
-                    if 60 <= sys_val <= 300 and 30 <= dia_val <= 200 and 30 <= pr_val <= 200:
-                        if sys_val > dia_val:
-                            return BloodPressureReading(
-                                systolic=sys_val,
-                                diastolic=dia_val,
-                                pulse=pr_val,
-                                timestamp=datetime.now()
-                            )
-        except Exception:
-            pass
-        return None
-    
-    @staticmethod
-    def _parse_format_bytes(data: bytes) -> Optional[BloodPressureReading]:
-        """解析二进制格式0x78 0x50 0x48"""
-        try:
-            if len(data) >= 6:
-                for offset in range(len(data) - 2):
-                    sys_val = data[offset]
-                    dia_val = data[offset + 1]
-                    pr_val = data[offset + 2]
-                    
-                    if 60 <= sys_val <= 250 and 30 <= dia_val <= 150 and 30 <= pr_val <= 180:
-                        if sys_val > dia_val:
-                            return BloodPressureReading(
-                                systolic=sys_val,
-                                diastolic=dia_val,
-                                pulse=pr_val,
-                                timestamp=datetime.now()
-                            )
-        except Exception:
-            pass
         return None
 
 
