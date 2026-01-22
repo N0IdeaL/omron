@@ -31,6 +31,5 @@ env/
 Thumbs.db
 
 # 注释
-*.txt
 .gitignore
 
