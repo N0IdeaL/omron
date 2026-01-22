@@ -201,11 +201,11 @@ class DataParser:
     def _parse_format_hbp9030(text: str) -> Optional[BloodPressureReading]:
         """
         HBP-9030 专用格式解析
-        固定格式: YYYY.MM.DD.HH.MM.ID(20).e(1).SYS(3).DIA(3).PR(3).MOTION+CR+LF
+        固定格式: YYYY,MM,DD,HH,MM,ID(20),e(1),SYS(3),DIA(3),PR(3),MOTION+CR+LF
         """
         try:
             clean = text.strip().replace("\x00", "")
-            parts = [p.strip() for p in clean.split('.') if p.strip() != ""]
+            parts = [p.strip() for p in clean.split(',') if p.strip() != ""]
             if len(parts) < 11:
                 return None
 
@@ -429,12 +429,32 @@ class SerialConnection:
     def _read_loop(self):
         """数据读取循环"""
         buffer = b''
+        last_status_time = time.time()
+        bytes_received_total = 0
+        
+        logger.info("开始监听串口数据...")
         
         while self.is_running and self.serial_port and self.serial_port.is_open:
             try:
+                # 每10秒输出一次状态，帮助诊断
+                now = time.time()
+                if now - last_status_time >= 10:
+                    if bytes_received_total == 0:
+                        logger.warning("【诊断】已等待10秒，未收到任何数据。请检查：")
+                        logger.warning("  1. 血压计是否开启了USB输出功能（功能选择模式-项号32）")
+                        logger.warning("  2. 波特率是否正确（尝试9600/19200/38400/115200）")
+                        logger.warning("  3. USB线是否为数据线（非纯充电线）")
+                        logger.warning("  4. 血压计是否完成了一次测量")
+                    else:
+                        logger.info(f"【诊断】已接收 {bytes_received_total} 字节")
+                    last_status_time = now
+                
                 if self.serial_port.in_waiting > 0:
                     data = self.serial_port.read(self.serial_port.in_waiting)
                     buffer += data
+                    bytes_received_total += len(data)
+                    
+                    logger.debug(f"收到 {len(data)} 字节: {data.hex()} | {data!r}")
                     
                     if self.on_raw_data:
                         self.on_raw_data(data)
@@ -576,7 +596,7 @@ class BloodPressureMonitorGUI:
         # 标题
         title_label = tk.Label(
             main_frame,
-            text="OMRON HBP-9030 血压监测",
+            text="OMRON HBP-9030 血压监测v3",
             font=PLATFORM.get_font(24, 'bold'),
             fg=self.COLORS['text_primary'],
             bg=self.COLORS['bg_dark']
@@ -948,7 +968,12 @@ class BloodPressureMonitorGUI:
         
         self.port_combo['values'] = port_names
         if port_names:
-            self.port_combo.current(0)
+            # 默认优先选择 COM3
+            default_port = 'COM3'
+            if default_port in port_names:
+                self.port_combo.set(default_port)
+            else:
+                self.port_combo.current(0)
         
         if ports:
             self._log(f"检测到 {len(ports)} 个串口:")
