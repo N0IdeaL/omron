@@ -67,9 +67,9 @@ class PlatformConfig:
             self.font_scale = 0.85  # 字体缩小
             self.fullscreen = True  # 默认全屏
         else:
-            self.window_size = "700x750"
-            self.window_min = (600, 650)
-            self.font_scale = 1.0
+            self.window_size = "350x200"
+            self.window_min = (400, 250)
+            self.font_scale = 1
             self.fullscreen = False
         
         # 串口路径前缀
@@ -182,7 +182,7 @@ class DataParser:
                 return None
 
             logger.debug(f"接收原始数据: {repr(text)}")
-            logger.debug(f"十六进制: {data.hex()}")
+            # logger.debug(f"十六进制: {data.hex()}")
 
             result = DataParser._parse_format_hbp9030(text)
             if result:
@@ -204,8 +204,9 @@ class DataParser:
         固定格式: YYYY,MM,DD,HH,MM,ID(20),e(1),SYS(3),DIA(3),PR(3),MOTION+CR+LF
         """
         try:
-            clean = text.strip().replace("\x00", "")
-            parts = [p.strip() for p in clean.split(',') if p.strip() != ""]
+            # clean = text.strip().replace("\x00", "")
+            # parts = [p.strip() for p in clean.split(',') if p.strip() != ""]
+            parts = text.strip().split(",")
             if len(parts) < 11:
                 return None
 
@@ -224,8 +225,8 @@ class DataParser:
                 return None
             if not (min_s.isdigit() and len(min_s) == 2):
                 return None
-            if not (device_id.isdigit() and len(device_id) == 20):
-                return None
+            # if not (device_id.isdigit() and len(device_id) == 20):
+            #     return None
 
             try:
                 sys_val = int(sys_s)
@@ -523,7 +524,7 @@ class BloodPressureMonitorGUI:
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("OMRON HBP-9030 血压监测")
+        self.root.title("邵逸夫医院大运河 OMRON HBP-9030 血压监测")
         self.root.geometry(PLATFORM.window_size)
         self.root.configure(bg=self.COLORS['bg_dark'])
         self.root.resizable(True, True)
@@ -539,6 +540,8 @@ class BloodPressureMonitorGUI:
         self.readings: List[BloodPressureReading] = []
         self.data_queue = queue.Queue()
         self.simulation_mode = False
+        self.connection_expanded = tk.BooleanVar(value=False)
+        self.history_expanded = tk.BooleanVar(value=False)
         
         # 串口连接
         self.serial_conn = SerialConnection(
@@ -590,35 +593,155 @@ class BloodPressureMonitorGUI:
         # 树莓派使用更紧凑的边距
         pad = 10 if PLATFORM.is_raspberry_pi else 20
         
-        main_frame = tk.Frame(self.root, bg=self.COLORS['bg_dark'])
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=pad, pady=pad)
+        # ========== 主界面滚动容器（Canvas + Scrollbar）==========
+        outer_frame = tk.Frame(self.root, bg=self.COLORS['bg_dark'])
+        outer_frame.pack(fill=tk.BOTH, expand=True)
         
-        # 标题
-        title_label = tk.Label(
-            main_frame,
-            text="OMRON HBP-9030 血压监测v3",
-            font=PLATFORM.get_font(24, 'bold'),
-            fg=self.COLORS['text_primary'],
-            bg=self.COLORS['bg_dark']
+        self.main_canvas = tk.Canvas(
+            outer_frame,
+            bg=self.COLORS['bg_dark'],
+            highlightthickness=0
         )
-        title_label.pack(pady=(0, pad))
+        self.main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # 连接控制区
-        self._create_connection_frame(main_frame)
+        self.main_scrollbar = tk.Scrollbar(
+            outer_frame,
+            orient=tk.VERTICAL,
+            command=self.main_canvas.yview
+        )
+        self.main_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.main_canvas.configure(yscrollcommand=self.main_scrollbar.set)
+        
+        content_frame = tk.Frame(self.main_canvas, bg=self.COLORS['bg_dark'])
+        content_frame.configure(padx=pad, pady=pad)
+        self.content_frame = content_frame
+        
+        self.main_canvas_window = self.main_canvas.create_window(
+            (0, 0),
+            window=content_frame,
+            anchor='nw'
+        )
+        
+        def _on_frame_configure(_event):
+            self.main_canvas.configure(scrollregion=self.main_canvas.bbox('all'))
+        
+        def _on_canvas_configure(event):
+            # 让内部Frame宽度始终跟随Canvas宽度
+            self.main_canvas.itemconfigure(self.main_canvas_window, width=event.width)
+        
+        content_frame.bind('<Configure>', _on_frame_configure)
+        self.main_canvas.bind('<Configure>', _on_canvas_configure)
+        
+        # 绑定滚轮（Windows / Linux）
+        # 说明：对 Text/Listbox/Combobox 等组件，优先让组件自身处理滚动；
+        #       其余情况滚动主界面。
+        self.root.bind_all('<MouseWheel>', self._on_main_mousewheel, add='+')
+        self.root.bind_all('<Button-4>', self._on_main_mousewheel, add='+')
+        self.root.bind_all('<Button-5>', self._on_main_mousewheel, add='+')
+        
+        # 默认显示最顶端
+        self.root.after_idle(lambda: self.main_canvas.yview_moveto(0.0))
+        
+        # # 标题
+        # title_label = tk.Label(
+        #     main_frame,
+        #     text="邵逸夫医院大运河",
+        #     font=PLATFORM.get_font(15, 'bold'),
+        #     fg=self.COLORS['text_primary'],
+        #     bg=self.COLORS['bg_dark']
+        # )
+        # title_label.pack(pady=(0, pad))
+        
+
         
         # 血压显示区
-        self._create_display_frame(main_frame)
+        self._create_display_frame(content_frame)
+
+        # 连接摘要区（折叠控制区）
+        self._create_connection_summary(content_frame)
+        self._create_connection_frame(content_frame)
         
-        # 历史记录区
-        self._create_history_frame(main_frame)
+        # 历史记录摘要区（折叠历史记录）
+        self._create_history_summary(content_frame)
+        self._create_history_frame(content_frame)
         
         # 日志区
-        self._create_log_frame(main_frame)
+        self._create_log_frame(content_frame)
+
+    def _on_main_mousewheel(self, event):
+        """主界面滚轮滚动（Canvas 容器）"""
+        # 让Text/Listbox/Combobox/Entry等控件保留自己的滚动/交互
+        if isinstance(event.widget, (tk.Text, tk.Listbox, ttk.Combobox, tk.Entry)):
+            return None
+        
+        if not hasattr(self, 'main_canvas'):
+            return None
+        
+        # Linux: Button-4/5
+        if getattr(event, 'num', None) == 4:
+            self.main_canvas.yview_scroll(-1, 'units')
+            return "break"
+        if getattr(event, 'num', None) == 5:
+            self.main_canvas.yview_scroll(1, 'units')
+            return "break"
+        
+        # Windows: MouseWheel
+        delta = getattr(event, 'delta', 0)
+        if delta:
+            self.main_canvas.yview_scroll(int(-1 * (delta / 120)), 'units')
+            return "break"
+        
+        return None
+    
+    def _create_connection_summary(self, parent):
+        """创建连接摘要区（仅显示状态点与连接按钮）"""
+        frame = tk.Frame(parent, bg=self.COLORS['bg_dark'])
+        frame.pack(fill=tk.X, pady=(0, 10))
+        self.connection_summary_frame = frame
+              
+        self.summary_connect_btn = tk.Button(
+            frame,
+            text="连接",
+            font=PLATFORM.get_font(9),
+            bg=self.COLORS['success'],
+            fg=self.COLORS['text_primary'],
+            activebackground=self.COLORS['accent'],
+            activeforeground=self.COLORS['text_primary'],
+            relief=tk.FLAT,
+            cursor='hand2',
+            width=6,
+            command=self._toggle_connection
+        )
+        self.summary_connect_btn.pack(side=tk.RIGHT)
+        
+        self.summary_indicator = tk.Canvas(
+            frame,
+            width=10,
+            height=10,
+            bg=self.COLORS['bg_dark'],
+            highlightthickness=0
+        )
+        self.summary_indicator.pack(side=tk.RIGHT, padx=(0, 6))
+        self.summary_indicator.create_oval(2, 2, 8, 8, fill=self.COLORS['danger'], outline='')
+
+        self.toggle_connection_btn = tk.Button(
+            frame,
+            text="▶ 显示连接设置",
+            font=PLATFORM.get_font(9),
+            bg=self.COLORS['bg_dark'],
+            fg=self.COLORS['text_secondary'],
+            activebackground=self.COLORS['bg_dark'],
+            activeforeground=self.COLORS['text_primary'],
+            relief=tk.FLAT,
+            cursor='hand2',
+            command=self._toggle_connection_panel
+        )
+        self.toggle_connection_btn.pack(side=tk.LEFT)
     
     def _create_connection_frame(self, parent):
         """创建连接控制区"""
         frame = tk.Frame(parent, bg=self.COLORS['bg_medium'], padx=15, pady=15)
-        frame.pack(fill=tk.X, pady=(0, 15))
+        self.connection_frame = frame
         
         # 第一行：端口和波特率选择
         port_frame = tk.Frame(frame, bg=self.COLORS['bg_medium'])
@@ -752,6 +875,21 @@ class BloodPressureMonitorGUI:
         )
         self.status_label.pack(side=tk.LEFT, padx=(8, 0))
     
+    def _toggle_connection_panel(self):
+        """切换连接控制区显示"""
+        if self.connection_expanded.get():
+            self.connection_frame.pack_forget()
+            self.toggle_connection_btn.config(text="▶ 显示连接设置")
+            self.connection_expanded.set(False)
+        else:
+            self.connection_frame.pack(
+                fill=tk.X,
+                pady=(0, 15),
+                before=self.history_summary_frame
+            )
+            self.toggle_connection_btn.config(text="▼ 隐藏连接设置")
+            self.connection_expanded.set(True)
+    
     def _create_display_frame(self, parent):
         """创建血压显示区"""
         frame = tk.Frame(parent, bg=self.COLORS['bg_medium'], padx=20, pady=25)
@@ -766,7 +904,7 @@ class BloodPressureMonitorGUI:
         
         # 收缩压
         sys_frame = tk.Frame(display_container, bg=self.COLORS['bg_medium'])
-        sys_frame.grid(row=0, column=1, sticky='nsew', padx=10)
+        sys_frame.grid(row=0, column=0, sticky='nsew', padx=10)
         
         tk.Label(
             sys_frame,
@@ -779,7 +917,7 @@ class BloodPressureMonitorGUI:
         self.sys_value = tk.Label(
             sys_frame,
             text="---",
-            font=PLATFORM.get_font(56, 'bold'),
+            font=PLATFORM.get_font(40, 'bold'),
             fg=self.COLORS['accent'],
             bg=self.COLORS['bg_medium']
         )
@@ -795,7 +933,7 @@ class BloodPressureMonitorGUI:
         
         # 舒张压
         dia_frame = tk.Frame(display_container, bg=self.COLORS['bg_medium'])
-        dia_frame.grid(row=0, column=0, sticky='nsew', padx=10)
+        dia_frame.grid(row=0, column=1, sticky='nsew', padx=10)
         
         tk.Label(
             dia_frame,
@@ -808,7 +946,7 @@ class BloodPressureMonitorGUI:
         self.dia_value = tk.Label(
             dia_frame,
             text="---",
-            font=PLATFORM.get_font(56, 'bold'),
+            font=PLATFORM.get_font(40, 'bold'),
             fg=self.COLORS['accent_light'],
             bg=self.COLORS['bg_medium']
         )
@@ -837,7 +975,7 @@ class BloodPressureMonitorGUI:
         self.pr_value = tk.Label(
             pr_frame,
             text="---",
-            font=PLATFORM.get_font(56, 'bold'),
+            font=PLATFORM.get_font(40, 'bold'),
             fg=self.COLORS['success'],
             bg=self.COLORS['bg_medium']
         )
@@ -862,39 +1000,14 @@ class BloodPressureMonitorGUI:
     
     def _create_history_frame(self, parent):
         """创建历史记录区"""
-        frame = tk.Frame(parent, bg=self.COLORS['bg_medium'], padx=15, pady=15)
-        frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
-        
-        header_frame = tk.Frame(frame, bg=self.COLORS['bg_medium'])
-        header_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(
-            header_frame,
-            text="历史记录",
-            font=PLATFORM.get_font(12, 'bold'),
-            fg=self.COLORS['text_primary'],
-            bg=self.COLORS['bg_medium']
-        ).pack(side=tk.LEFT)
-        
-        clear_btn = tk.Button(
-            header_frame,
-            text="清空",
-            font=PLATFORM.get_font(9),
-            bg=self.COLORS['bg_light'],
-            fg=self.COLORS['text_secondary'],
-            activebackground=self.COLORS['danger'],
-            activeforeground=self.COLORS['text_primary'],
-            relief=tk.FLAT,
-            cursor='hand2',
-            command=self._clear_history
-        )
-        clear_btn.pack(side=tk.RIGHT)
+        frame = tk.Frame(parent, bg=self.COLORS['bg_medium'], padx=10, pady=6)
+        self.history_frame = frame
         
         list_frame = tk.Frame(frame, bg=self.COLORS['bg_dark'])
         list_frame.pack(fill=tk.BOTH, expand=True)
         
         scrollbar = tk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar.pack(side=tk.LEFT, fill=tk.Y)
         
         self.history_listbox = tk.Listbox(
             list_frame,
@@ -905,10 +1018,46 @@ class BloodPressureMonitorGUI:
             selectforeground=self.COLORS['text_primary'],
             highlightthickness=0,
             relief=tk.FLAT,
-            yscrollcommand=scrollbar.set
+            yscrollcommand=scrollbar.set,
+            height=5
         )
-        self.history_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.history_listbox.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.history_listbox.yview)
+    
+    def _create_history_summary(self, parent):
+        """创建历史记录摘要区（仅显示清空按钮）"""
+        frame = tk.Frame(parent, bg=self.COLORS['bg_dark'])
+        frame.pack(fill=tk.X)
+        self.history_summary_frame = frame
+        
+        self.clear_history_btn = tk.Button(
+            frame,
+            text="清空",
+            font=PLATFORM.get_font(9),
+            bg=self.COLORS['bg_light'],
+            fg=self.COLORS['text_secondary'],
+            activebackground=self.COLORS['danger'],
+            activeforeground=self.COLORS['text_primary'],
+            relief=tk.FLAT,
+            cursor='hand2',
+            width=6,
+            command=self._clear_history
+        )
+        self.clear_history_btn.pack(side=tk.RIGHT)
+        
+        self.toggle_history_btn = tk.Button(
+            frame,
+            text="▶ 显示历史记录",
+            font=PLATFORM.get_font(9),
+            bg=self.COLORS['bg_dark'],
+            fg=self.COLORS['text_secondary'],
+            activebackground=self.COLORS['bg_dark'],
+            activeforeground=self.COLORS['text_primary'],
+            relief=tk.FLAT,
+            cursor='hand2',
+            command=self._toggle_history
+        )
+        self.toggle_history_btn.pack(side=tk.LEFT)
     
     def _create_log_frame(self, parent):
         """创建日志区"""
@@ -916,10 +1065,11 @@ class BloodPressureMonitorGUI:
         
         toggle_frame = tk.Frame(parent, bg=self.COLORS['bg_dark'])
         toggle_frame.pack(fill=tk.X)
+        self.log_toggle_frame = toggle_frame
         
         self.toggle_log_btn = tk.Button(
             toggle_frame,
-            text="▶ 显示原始数据日志（调试用）",
+            text="▶ 显示数据日志",
             font=PLATFORM.get_font(9),
             bg=self.COLORS['bg_dark'],
             fg=self.COLORS['text_secondary'],
@@ -929,12 +1079,12 @@ class BloodPressureMonitorGUI:
             cursor='hand2',
             command=self._toggle_log
         )
-        self.toggle_log_btn.pack(anchor='w')
+        self.toggle_log_btn.pack(side=tk.LEFT)
         
         self.log_frame = tk.Frame(parent, bg=self.COLORS['bg_dark'])
         
         log_scrollbar = tk.Scrollbar(self.log_frame)
-        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        log_scrollbar.pack(side=tk.LEFT, fill=tk.Y)
         
         self.log_text = tk.Text(
             self.log_frame,
@@ -954,12 +1104,28 @@ class BloodPressureMonitorGUI:
         """切换日志显示"""
         if self.log_expanded.get():
             self.log_frame.pack_forget()
-            self.toggle_log_btn.config(text="▶ 显示原始数据日志（调试用）")
+            self.toggle_log_btn.config(text="▶ 显示数据日志")
             self.log_expanded.set(False)
         else:
             self.log_frame.pack(fill=tk.X, pady=(5, 0))
-            self.toggle_log_btn.config(text="▼ 隐藏原始数据日志")
+            self.toggle_log_btn.config(text="▼ 隐藏数据日志")
             self.log_expanded.set(True)
+    
+    def _toggle_history(self):
+        """切换历史记录显示"""
+        if self.history_expanded.get():
+            self.history_frame.pack_forget()
+            self.toggle_history_btn.config(text="▶ 显示历史记录")
+            self.history_expanded.set(False)
+        else:
+            self.history_frame.pack(
+                fill=tk.BOTH,
+                expand=True,
+                pady=(0, 15),
+                before=self.log_toggle_frame
+            )
+            self.toggle_history_btn.config(text="▼ 隐藏历史记录")
+            self.history_expanded.set(True)
     
     def _refresh_ports(self):
         """刷新串口列表"""
@@ -1037,17 +1203,26 @@ class BloodPressureMonitorGUI:
         if connected:
             if is_simulation:
                 self.connect_btn.config(state='disabled')
+                self.summary_connect_btn.config(text="模拟中", bg=self.COLORS['simulation'], state='disabled')
+                self.summary_indicator.delete('all')
+                self.summary_indicator.create_oval(2, 2, 8, 8, fill=self.COLORS['simulation'], outline='')
                 self.status_indicator.delete('all')
                 self.status_indicator.create_oval(2, 2, 10, 10, fill=self.COLORS['simulation'], outline='')
                 self.status_label.config(text="模拟模式", fg=self.COLORS['simulation'])
             else:
                 self.connect_btn.config(text="断开", bg=self.COLORS['danger'], state='normal')
+                self.summary_connect_btn.config(text="断开", bg=self.COLORS['danger'], state='normal')
+                self.summary_indicator.delete('all')
+                self.summary_indicator.create_oval(2, 2, 8, 8, fill=self.COLORS['success'], outline='')
                 self.sim_btn.config(state='disabled')
                 self.status_indicator.delete('all')
                 self.status_indicator.create_oval(2, 2, 10, 10, fill=self.COLORS['success'], outline='')
                 self.status_label.config(text="已连接", fg=self.COLORS['success'])
         else:
             self.connect_btn.config(text="连接", bg=self.COLORS['success'], state='normal')
+            self.summary_connect_btn.config(text="连接", bg=self.COLORS['success'], state='normal')
+            self.summary_indicator.delete('all')
+            self.summary_indicator.create_oval(2, 2, 8, 8, fill=self.COLORS['danger'], outline='')
             self.sim_btn.config(state='normal')
             self.status_indicator.delete('all')
             self.status_indicator.create_oval(2, 2, 10, 10, fill=self.COLORS['danger'], outline='')
@@ -1114,21 +1289,35 @@ class BloodPressureMonitorGUI:
         if bp_type == 'sys':
             if value < 90:
                 return self.COLORS['warning']
-            elif value < 120:
-                return self.COLORS['success']
             elif value < 140:
-                return self.COLORS['warning']
+                return self.COLORS['success']
             else:
-                return self.COLORS['danger']
+                return self.COLORS['warning']
         else:
             if value < 60:
                 return self.COLORS['warning']
-            elif value < 80:
-                return self.COLORS['success']
             elif value < 90:
-                return self.COLORS['warning']
+                return self.COLORS['success']
             else:
-                return self.COLORS['danger']
+                return self.COLORS['warning']
+        # if bp_type == 'sys':
+        #     if value < 90:
+        #         return self.COLORS['warning']
+        #     elif value < 120:
+        #         return self.COLORS['success']
+        #     elif value < 140:
+        #         return self.COLORS['warning']
+        #     else:
+        #         return self.COLORS['danger']
+        # else:
+        #     if value < 60:
+        #         return self.COLORS['warning']
+        #     elif value < 80:
+        #         return self.COLORS['success']
+        #     elif value < 90:
+        #         return self.COLORS['warning']
+        #     else:
+        #         return self.COLORS['danger']
     
     def _clear_history(self):
         """清空历史记录"""
