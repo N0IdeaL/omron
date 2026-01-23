@@ -22,6 +22,10 @@ import time
 import os
 import sys
 import platform
+import json
+import socket
+import http.server
+import base64
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Callable
@@ -67,8 +71,8 @@ class PlatformConfig:
             self.font_scale = 0.85  # 字体缩小
             self.fullscreen = True  # 默认全屏
         else:
-            self.window_size = "350x200"
-            self.window_min = (400, 250)
+            self.window_size = "500x400"
+            self.window_min = (200, 100)
             self.font_scale = 1
             self.fullscreen = False
         
@@ -135,6 +139,292 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 logger = setup_logging()
+
+WEB_SERVER_ENABLED = True
+WEB_SERVER_HOST = "0.0.0.0"
+WEB_SERVER_PORT = 8080
+
+WEB_AUTH_ENABLED = False
+WEB_AUTH_PASSWORD = "x"
+
+
+# ============== Web 数据共享（用于院内网其它电脑查看） ==============
+class WebDataStore:
+    """线程安全地保存最新血压值，供 Web 接口读取"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._data = {
+            "sys": None,
+            "dia": None,
+            "pulse": None,
+            "timestamp": None,
+            "status": "未连接",
+        }
+
+    def update_reading(self, reading: "BloodPressureReading"):
+        with self._lock:
+            self._data.update(
+                {
+                    "sys": reading.systolic,
+                    "dia": reading.diastolic,
+                    "pulse": reading.pulse,
+                    "timestamp": reading.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+
+    def set_status(self, status: str):
+        with self._lock:
+            self._data["status"] = status
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._data)
+
+
+class BPWebServer:
+    """内网 Web 展示服务（标准库实现，无需 Flask）"""
+
+    HTML_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>血压实时监控</title>
+  <style>
+    /* 基础样式：取消滚动条，背景深色 */
+    body { 
+        font-family: Arial, sans-serif; 
+        background:#0b1020; 
+        color:#fff; 
+        margin:0; 
+        overflow: hidden; /* 防止出现滚动条 */
+    }
+    
+    /* 容器：针对 500x400 视窗优化，减小边距 */
+    .wrap { 
+        width: 100%; 
+        box-sizing: border-box; /* 确保padding不撑大宽度 */
+        padding: 20px; 
+    }
+
+    /* 标题与状态栏：字体调小，节省垂直空间 */
+    .header-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+    }
+    .title { font-size: 16px; opacity: .9; font-weight: bold; }
+    .status-line { font-size: 12px; opacity: .6; text-align: right; }
+
+    /* 网格布局：3列等宽 */
+    .grid { 
+        display: grid; 
+        grid-template-columns: repeat(3, 1fr); 
+        gap: 10px; 
+    }
+
+    /* 卡片样式：紧凑型 */
+    .card { 
+        background:#16213e; 
+        border-radius: 8px; 
+        padding: 12px 5px; 
+        text-align: center; 
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+
+    /* 标签：小字体 */
+    .label { font-size: 12px; opacity: .6; margin-bottom: 5px; text-transform: uppercase; }
+
+    /* 数值：大字体但适中，确保一行放下 */
+    .val { 
+        font-size: 42px; 
+        font-weight: 700; 
+        line-height: 1.1;
+    }
+
+    /* 页脚：极小 */
+    .footer { margin-top: 15px; font-size: 10px; opacity: .4; text-align: center; }
+  </style>
+  <script>
+    async function refresh() {
+      try {
+        const r = await fetch('/data', {cache: 'no-store'});
+        const d = await r.json();
+        
+        document.getElementById('sys').innerText = d.sys ?? '--';
+        document.getElementById('dia').innerText = d.dia ?? '--';
+        document.getElementById('pulse').innerText = d.pulse ?? '--';
+        
+        // 更新时间与状态
+        document.getElementById('ts').innerText = d.timestamp ? d.timestamp.split(' ')[1] : '--:--'; // 只显示时分秒
+        
+        const statusElem = document.getElementById('status');
+        statusElem.innerText = d.status ?? '未知';
+        statusElem.style.color = d.status === '已连接' ? '#4ecca3' : '#ff6b6b';
+
+      } catch (e) {
+        document.getElementById('status').innerText = '断开';
+        document.getElementById('status').style.color = '#ff6b6b';
+      }
+    }
+    setInterval(refresh, 1000);
+    window.addEventListener('load', refresh);
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    
+    <!-- 顶部标题栏 -->
+    <div class="header-row">
+        <div class="title">HBP-9030</div>
+        <div class="status-line">
+            <span id="status">连接中...</span> <br>
+            <span id="ts">--:--:--</span>
+        </div>
+    </div>
+
+    <!-- 数据展示区：三列并排 -->
+    <div class="grid">
+      <!-- 收缩压 -->
+      <div class="card">
+        <div class="label">SYS</div>
+        <div class="val" style="color:#e94560;"><span id="sys">--</span></div>
+      </div>
+      
+      <!-- 舒张压 -->
+      <div class="card">
+        <div class="label">DIA</div>
+        <div class="val" style="color:#ff6b6b;"><span id="dia">--</span></div>
+      </div>
+      
+      <!-- 心率 -->
+      <div class="card">
+        <div class="label">PULSE</div>
+        <div class="val" style="color:#4ecca3;"><span id="pulse">--</span></div>
+      </div>
+    </div>
+
+    <div class="footer">IP: <script>document.write(location.hostname)</script></div>
+  </div>
+</body>
+</html>
+""".strip()
+
+    def __init__(self, data_store: WebDataStore, host: str, port: int):
+        self.data_store = data_store
+        self.host = host
+        self.port = port
+        self._httpd = None
+        self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _best_effort_local_ip() -> str:
+        """尝试获取本机内网IP（用于日志提示），失败则返回127.0.0.1"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+
+    def start(self) -> bool:
+        """启动 Web 服务（后台线程）"""
+        try:
+            Handler = self._make_handler()
+            self._httpd = http.server.ThreadingHTTPServer((self.host, self.port), Handler)
+            self._httpd.data_store = self.data_store  # type: ignore[attr-defined]
+
+            self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+            self._thread.start()
+
+            ip = self._best_effort_local_ip()
+            logger.info(f"Web服务已启动: http://{ip}:{self.port}/ （院内网可访问）")
+            logger.info("若无法访问，请检查 Windows 防火墙是否允许该端口入站。")
+            return True
+        except OSError as e:
+            logger.warning(f"Web服务启动失败（端口可能被占用/无权限）: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Web服务启动失败: {e}", exc_info=True)
+            return False
+
+    def stop(self):
+        """停止 Web 服务"""
+        try:
+            if self._httpd:
+                self._httpd.shutdown()
+                self._httpd.server_close()
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=2.0)
+        except Exception as e:
+            logger.debug(f"停止Web服务时出错: {e}")
+
+    def _make_handler(self):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return
+
+            def _auth_required(self):
+                body = "Unauthorized".encode("utf-8")
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="BP Monitor"')
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _is_authorized(self) -> bool:
+                if not WEB_AUTH_ENABLED:
+                    return True
+                auth = self.headers.get("Authorization", "")
+                if not auth.startswith("Basic "):
+                    return False
+                try:
+                    raw = base64.b64decode(auth.split(" ", 1)[1].strip()).decode("utf-8", errors="ignore")
+                    # raw format: username:password
+                    if ":" not in raw:
+                        return False
+                    _user, pwd = raw.split(":", 1)
+                    return pwd == WEB_AUTH_PASSWORD
+                except Exception:
+                    return False
+
+            def _send(self, code: int, body: bytes, content_type: str):
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if not self._is_authorized():
+                    self._auth_required()
+                    return
+
+                if self.path == "/" or self.path.startswith("/?"):
+                    body = BPWebServer.HTML_TEMPLATE.encode("utf-8")
+                    self._send(200, body, "text/html; charset=utf-8")
+                    return
+
+                if self.path == "/data":
+                    store: WebDataStore = self.server.data_store  # type: ignore[attr-defined]
+                    data = store.snapshot()
+                    body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                    self._send(200, body, "application/json; charset=utf-8")
+                    return
+
+                self._send(404, b"Not Found", "text/plain; charset=utf-8")
+
+        return Handler
 
 
 # ============== 数据类 ==============
@@ -542,6 +832,8 @@ class BloodPressureMonitorGUI:
         self.simulation_mode = False
         self.connection_expanded = tk.BooleanVar(value=False)
         self.history_expanded = tk.BooleanVar(value=False)
+        self.web_data_store = WebDataStore()
+        self.web_server: Optional[BPWebServer] = None
         
         # 串口连接
         self.serial_conn = SerialConnection(
@@ -560,6 +852,11 @@ class BloodPressureMonitorGUI:
         # 创建界面
         self._create_styles()
         self._create_widgets()
+
+        # 启动 Web 服务（院内网其它电脑可访问）
+        if WEB_SERVER_ENABLED:
+            self.web_server = BPWebServer(self.web_data_store, WEB_SERVER_HOST, WEB_SERVER_PORT)
+            self.web_server.start()
         
         # 更新串口列表
         self._refresh_ports()
@@ -642,17 +939,16 @@ class BloodPressureMonitorGUI:
         # 默认显示最顶端
         self.root.after_idle(lambda: self.main_canvas.yview_moveto(0.0))
         
-        # # 标题
-        # title_label = tk.Label(
-        #     main_frame,
-        #     text="邵逸夫医院大运河",
-        #     font=PLATFORM.get_font(15, 'bold'),
-        #     fg=self.COLORS['text_primary'],
-        #     bg=self.COLORS['bg_dark']
-        # )
-        # title_label.pack(pady=(0, pad))
+        # 标题
+        title_label = tk.Label(
+            content_frame,
+            text="邵逸夫医院大运河",
+            font=PLATFORM.get_font(15, 'bold'),
+            fg=self.COLORS['text_primary'],
+            bg=self.COLORS['bg_dark']
+        )
+        title_label.pack(pady=(0, pad))
         
-
         
         # 血压显示区
         self._create_display_frame(content_frame)
@@ -892,7 +1188,7 @@ class BloodPressureMonitorGUI:
     
     def _create_display_frame(self, parent):
         """创建血压显示区"""
-        frame = tk.Frame(parent, bg=self.COLORS['bg_medium'], padx=20, pady=25)
+        frame = tk.Frame(parent, bg=self.COLORS['bg_medium'], padx=20, pady=15)
         frame.pack(fill=tk.X, pady=(0, 15))
         
         display_container = tk.Frame(frame, bg=self.COLORS['bg_medium'])
@@ -906,13 +1202,13 @@ class BloodPressureMonitorGUI:
         sys_frame = tk.Frame(display_container, bg=self.COLORS['bg_medium'])
         sys_frame.grid(row=0, column=0, sticky='nsew', padx=10)
         
-        tk.Label(
-            sys_frame,
-            text="收缩压",
-            font=PLATFORM.get_font(14),
-            fg=self.COLORS['text_secondary'],
-            bg=self.COLORS['bg_medium']
-        ).pack()
+        # tk.Label(
+        #     sys_frame,
+        #     text="收缩压",
+        #     font=PLATFORM.get_font(12),
+        #     fg=self.COLORS['text_secondary'],
+        #     bg=self.COLORS['bg_medium']
+        # ).pack()
         
         self.sys_value = tk.Label(
             sys_frame,
@@ -923,25 +1219,25 @@ class BloodPressureMonitorGUI:
         )
         self.sys_value.pack()
         
-        tk.Label(
-            sys_frame,
-            text="mmHg",
-            font=PLATFORM.get_font(12),
-            fg=self.COLORS['text_secondary'],
-            bg=self.COLORS['bg_medium']
-        ).pack()
+        # tk.Label(
+        #     sys_frame,
+        #     text="mmHg",
+        #     font=PLATFORM.get_font(12),
+        #     fg=self.COLORS['text_secondary'],
+        #     bg=self.COLORS['bg_medium']
+        # ).pack()
         
         # 舒张压
         dia_frame = tk.Frame(display_container, bg=self.COLORS['bg_medium'])
         dia_frame.grid(row=0, column=1, sticky='nsew', padx=10)
         
-        tk.Label(
-            dia_frame,
-            text="舒张压",
-            font=PLATFORM.get_font(14),
-            fg=self.COLORS['text_secondary'],
-            bg=self.COLORS['bg_medium']
-        ).pack()
+        # tk.Label(
+        #     dia_frame,
+        #     text="舒张压",
+        #     font=PLATFORM.get_font(12),
+        #     fg=self.COLORS['text_secondary'],
+        #     bg=self.COLORS['bg_medium']
+        # ).pack()
         
         self.dia_value = tk.Label(
             dia_frame,
@@ -952,25 +1248,25 @@ class BloodPressureMonitorGUI:
         )
         self.dia_value.pack()
         
-        tk.Label(
-            dia_frame,
-            text="mmHg",
-            font=PLATFORM.get_font(12),
-            fg=self.COLORS['text_secondary'],
-            bg=self.COLORS['bg_medium']
-        ).pack()
+        # tk.Label(
+        #     dia_frame,
+        #     text="mmHg",
+        #     font=PLATFORM.get_font(12),
+        #     fg=self.COLORS['text_secondary'],
+        #     bg=self.COLORS['bg_medium']
+        # ).pack()
         
         # 心率
         pr_frame = tk.Frame(display_container, bg=self.COLORS['bg_medium'])
         pr_frame.grid(row=0, column=2, sticky='nsew', padx=10)
         
-        tk.Label(
-            pr_frame,
-            text="心率",
-            font=PLATFORM.get_font(14),
-            fg=self.COLORS['text_secondary'],
-            bg=self.COLORS['bg_medium']
-        ).pack()
+        # tk.Label(
+        #     pr_frame,
+        #     text="心率",
+        #     font=PLATFORM.get_font(12),
+        #     fg=self.COLORS['text_secondary'],
+        #     bg=self.COLORS['bg_medium']
+        # ).pack()
         
         self.pr_value = tk.Label(
             pr_frame,
@@ -981,13 +1277,13 @@ class BloodPressureMonitorGUI:
         )
         self.pr_value.pack()
         
-        tk.Label(
-            pr_frame,
-            text="bpm",
-            font=PLATFORM.get_font(12),
-            fg=self.COLORS['text_secondary'],
-            bg=self.COLORS['bg_medium']
-        ).pack()
+        # tk.Label(
+        #     pr_frame,
+        #     text="bpm",
+        #     font=PLATFORM.get_font(12),
+        #     fg=self.COLORS['text_secondary'],
+        #     bg=self.COLORS['bg_medium']
+        # ).pack()
         
         self.update_time_label = tk.Label(
             frame,
@@ -996,7 +1292,7 @@ class BloodPressureMonitorGUI:
             fg=self.COLORS['text_secondary'],
             bg=self.COLORS['bg_medium']
         )
-        self.update_time_label.pack(pady=(15, 0))
+        self.update_time_label.pack(pady=(10, 0))
     
     def _create_history_frame(self, parent):
         """创建历史记录区"""
@@ -1239,6 +1535,10 @@ class BloodPressureMonitorGUI:
     def _on_status_change(self, status: str):
         """处理状态变化"""
         self.data_queue.put(('status', status))
+        try:
+            self.web_data_store.set_status(status)
+        except Exception:
+            pass
     
     def _process_queue(self):
         """处理数据队列"""
@@ -1264,6 +1564,10 @@ class BloodPressureMonitorGUI:
     
     def _update_display(self, reading: BloodPressureReading):
         """更新显示"""
+        try:
+            self.web_data_store.update_reading(reading)
+        except Exception:
+            pass
         self.sys_value.config(text=str(reading.systolic))
         self.dia_value.config(text=str(reading.diastolic))
         self.pr_value.config(text=str(reading.pulse))
@@ -1339,6 +1643,8 @@ class BloodPressureMonitorGUI:
         if self.simulation_mode:
             self.simulator.stop()
         self.serial_conn.disconnect()
+        if self.web_server:
+            self.web_server.stop()
         self.root.destroy()
     
     def run(self):
@@ -1536,6 +1842,7 @@ def main():
     
     app = BloodPressureMonitorGUI()
     app.run()
+    
 
 
 if __name__ == '__main__':
