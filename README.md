@@ -2,11 +2,12 @@
 ## 程序功能
 用数据线连接血压计的USB-B口和电脑的USB-A口，通过串口通信，让电脑可以
 
-- 接收测量的血压和心率数据
-
-- 测量完成后自动接收并显示结果
+- 测量的血压和心率数据，测量完成后自动接收并显示结果
 
 - 保存历史测量记录 
+
+- 允许同一网络内的其它电脑读取此数据
+
 
 ## 要求的输出数据格式（默认传输格式5）
 
@@ -16,40 +17,48 @@
 
 ## 安装方法
 ### WINDOWS
-- 拉取整个项目，双击[build.bat](https://github.com/N0IdeaL/omron/blob/main/build.bat)或运行`python build_exe.py`后即获得编译完成的.exe文件，位于`dist/血压监测程序.exe`。
+- A端（连接血压计的电脑）
+   - 拉取整个项目，双击[build.bat](https://github.com/N0IdeaL/omron/blob/main/build.bat)后即获得编译完成的.exe文件，位于`dist/血压监测程序.exe`。
 
-  - 对于没有python环境的电脑，直接复制此exe文件，双击打开即可运行。
+      - 对于没有python环境的电脑，直接复制此exe文件，双击打开即可运行。
 
-  - 对于有python环境的电脑，也可以直接运行[bp_monitor.py](https://github.com/N0IdeaL/omron/blob/main/bp_monitor.py)
+      - 对于有python环境的电脑，也可以直接运行[bp_monitor.py](https://github.com/N0IdeaL/omron/blob/main/bp_monitor.py)
 
-- 开始运行后，在`dist/bp_monitor.log`下查看日志内容。
+   - 开始运行后，在`dist/bp_monitor.log`下查看日志内容。
+
+- B端（同一局域网其它电脑）
+   - 拉取整个项目，双击[build_b.bat](https://github.com/N0IdeaL/omron/blob/main/build_b.bat)后即获得编译完成的.exe文件，位于`dist_b/血压监测程序.exe`。
+
+      - 对于没有python环境的电脑，直接复制此exe文件，双击打开即可运行。
+
+      - 对于有python环境的电脑，也可以直接运行[bp_monitor_b.py](https://github.com/N0IdeaL/omron/blob/main/bp_monitor_b.py)
+
+   - 此程序窗口自动置顶。
 
 ### raspberry-pi
 - to be updated...
 
 
 ## 使用步骤
-1. 用USB线连接HBP-9030血压计到电脑
+- A端（连接血压计的电脑）
 
-2. 打开程序。默认密码为空字符串
+   1. 打开程序。默认密码为空字符串
 
-3. 在"串口"下拉菜单中选择对应的COM端口。默认串口为COM3
-   - 如果看不到端口，点击"刷新"按钮
-   - 如果仍然看不到，请检查USB线是否连接好
+   2. 在"串口"下拉菜单中选择对应的COM端口。默认串口为COM3
+      - 如果看不到端口，点击"刷新"按钮
+      - 如果仍然看不到，请检查USB线是否连接好
 
-4. 点击"连接"按钮
+   3. 点击"连接"按钮
 
-5. 在血压计上进行测量
-   - 测量完成后，数据会自动显示在程序界面上
+   4. 在血压计上进行测量
+      - 测量完成后，数据会自动显示在程序界面上
 
-6. 使用完毕后，点击"断开"按钮
+   5. 使用完毕后，点击"断开"按钮
 
-## 院内网网页查看（同一局域网其它电脑）
-- 程序默认会在后台启动一个 Web 服务（无需安装 Flask）
-- 在其它电脑浏览器打开：`http://30.3.11.46:8080/`（其中 `30.3.11.46` 为连接血压计的电脑IP）
-- JSON接口：`http://30.3.11.46:8080/data`
-- 访问保护：浏览器会弹出认证框，密码为 `231218`（用户名随意）
+- B端（同一局域网其它电脑）
+   1. 网页端：在其它同一局域网电脑浏览器打开：`http://{ip}:8080/`（A端电脑的IP）。
+      - 浏览器会弹出认证框，默认密码为为空字符串（用户名随意）
+      - 如无法访问，请检查Windows 防火墙是否允许 8080 端口入站
 
-如无法访问，请检查：
-- Windows 防火墙是否允许 8080 端口入站
-- 端口是否被占用（可在 `bp_monitor.py` 顶部修改 `WEB_SERVER_PORT`）
+   2. 客户端：打开程序
+      - 此窗口默认位于最上层

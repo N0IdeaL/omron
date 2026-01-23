@@ -145,7 +145,7 @@ WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = 8080
 
 WEB_AUTH_ENABLED = False
-WEB_AUTH_PASSWORD = "x"
+WEB_AUTH_PASSWORD = ""
 
 
 # ============== Web 数据共享（用于院内网其它电脑查看） ==============

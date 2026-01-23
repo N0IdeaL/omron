@@ -3,10 +3,11 @@ from tkinter import font
 import requests
 
 # 配置
-DATA_URL = "http://30.3.11.46:8080/data"
+IP = "  " # 接血压计的电脑的IP
+DATA_URL = f"http://{IP}:8080/data"
 REFRESH_RATE = 1000  # 刷新频率 (毫秒)
 AUTH_USERNAME = "user"   # 用户名任意
-AUTH_PASSWORD = "x" # 网页认证密码
+AUTH_PASSWORD = "" # 网页认证密码
 
 # 颜色定义
 COLORS = {
